@@ -1,0 +1,523 @@
+CosyNook:
+Работающий скрипт с анимациями: Idle, Walk, run.
+using UnityEngine;
+public class PlayerAnimatorOnly : MonoBehaviour
+{
+    [Header("Movement Settings")]
+    public float walkSpeed = 5f;
+    public float runSpeed = 8f;
+    public float acceleration = 15f;
+    public float rotationSpeed = 540f;
+    public float rotationSmoothTime = 0.1f;
+    
+    [Header("Animation Settings")]
+    public float animationSmoothTime = 0.08f;
+    public float turnAnimationSpeed = 3f; // Добавлена недостающая переменная
+    
+    [Header("Directional Movement Settings")]
+    public float sidewaysWalkSpeed = 4f;
+    public float sidewaysRunSpeed = 6f;
+    public float backwardWalkSpeed = 3f;
+    public float backwardRunSpeed = 5f;
+    public bool faceMovementDirection = false;
+    
+    [Header("References")]
+    public Animator animator;
+    public Transform cameraTransform;
+    
+    // Хэши параметров аниматора
+    private static readonly int SpeedHash = Animator.StringToHash("Speed");
+    private static readonly int IsMovingHash = Animator.StringToHash("IsMoving");
+    private static readonly int IsRunningHash = Animator.StringToHash("IsRunning");
+    private static readonly int IsGroundedHash = Animator.StringToHash("IsGrounded");
+    private static readonly int TurnAngleHash = Animator.StringToHash("TurnAngle");
+    private static readonly int IsTurningHash = Animator.StringToHash("IsTurning");
+    private static readonly int TurnSpeedHash = Animator.StringToHash("TurnSpeed");
+    private static readonly int MoveXHash = Animator.StringToHash("MoveX");
+    private static readonly int MoveYHash = Animator.StringToHash("MoveY");
+    
+    // Состояние
+    private Vector3 currentVelocity;
+    private Vector3 smoothedVelocity;
+    private Vector3 previousForward;
+    private float currentSpeed;
+    private float rotationVelocity;
+    private bool isRunning = false;
+    private bool isGrounded = true;
+    private float turnAngle;
+    private float turnSpeed;
+    private bool isTurning;
+    private Vector3 inputVector;
+    private string currentMovementType;
+    private float sidewaysInput;
+    private float forwardInput;
+    
+    void Start()
+    {
+        if (animator == null)
+            animator = GetComponent<Animator>();
+            
+        if (cameraTransform == null)
+            cameraTransform = Camera.main?.transform;
+            
+        smoothedVelocity = transform.forward;
+        previousForward = transform.forward;
+    }
+    
+    void Update()
+    {
+        HandleInput();
+        UpdateTurnAnimation();
+        UpdateAnimations();
+        UpdateRotation();
+        
+        previousForward = transform.forward;
+    }
+    
+    void HandleInput()
+    {
+        isRunning = Input.GetKey(KeyCode.LeftShift);
+        
+        float h = Input.GetAxis("Horizontal");
+        float v = Input.GetAxis("Vertical");
+        
+        inputVector = new Vector3(h, 0, v);
+        sidewaysInput = h;
+        forwardInput = v;
+        
+        // Определяем тип движения
+        DetermineMovementType(h, v);
+        
+        // Определяем, есть ли ввод
+        bool hasInput = inputVector.magnitude > 0.05f;
+        
+        if (hasInput)
+        {
+            // Используем raw input для более быстрого отклика
+            float rawH = Input.GetAxisRaw("Horizontal");
+            float rawV = Input.GetAxisRaw("Vertical");
+            
+            // Для чистого ввода используем raw значения
+            if (Mathf.Abs(rawH) > 0.9f || Mathf.Abs(rawV) > 0.9f)
+            {
+                h = Mathf.Sign(rawH) * Mathf.Clamp01(Mathf.Abs(rawH));
+                v = Mathf.Sign(rawV) * Mathf.Clamp01(Mathf.Abs(rawV));
+            }
+            
+            inputVector = new Vector3(h, 0, v);
+            
+            // Нормализуем если нужно (для диагоналей)
+            if (inputVector.magnitude > 1f)
+            {
+                inputVector.Normalize();
+            }
+            
+            // Определяем скорость на основе типа движения
+            float targetSpeed = 0f;
+            float inputMagnitude = inputVector.magnitude;
+
+switch (currentMovementType)
+            {
+                case "ForwardOnly":
+                    targetSpeed = isRunning ? runSpeed : walkSpeed;
+                    targetSpeed *= Mathf.Abs(v);
+                    break;
+                    
+                case "BackwardOnly":
+                    targetSpeed = isRunning ? backwardRunSpeed : backwardWalkSpeed;
+                    targetSpeed *= Mathf.Abs(v);
+                    break;
+                    
+                case "SidewaysOnly":
+                    targetSpeed = isRunning ? sidewaysRunSpeed : sidewaysWalkSpeed;
+                    targetSpeed *= Mathf.Abs(h);
+                    break;
+                    
+                case "ForwardSideways":
+                case "BackwardSideways":
+                    float baseSpeed = isRunning ? 
+                        (currentMovementType == "BackwardSideways" ? backwardRunSpeed : runSpeed) :
+                        (currentMovementType == "BackwardSideways" ? backwardWalkSpeed : walkSpeed);
+                    targetSpeed = baseSpeed * inputMagnitude;
+                    break;
+                    
+                default:
+                    targetSpeed = isRunning ? runSpeed : walkSpeed;
+                    targetSpeed *= inputMagnitude;
+                    break;
+            }
+            
+            // Более быстрое ускорение для достижения целевой скорости
+            currentSpeed = Mathf.MoveTowards(currentSpeed, targetSpeed, acceleration * Time.deltaTime);
+            
+            // Получаем направление движения
+            Vector3 moveDirection = GetMovementDirection(h, v);
+            
+            // Обновляем velocity
+            if (moveDirection.magnitude > 0.1f)
+            {
+                currentVelocity = moveDirection.normalized * currentSpeed;
+                smoothedVelocity = Vector3.Lerp(smoothedVelocity, moveDirection.normalized, 
+                    acceleration * 2f * Time.deltaTime);
+            }
+        }
+        else
+        {
+            // Быстрое замедление при отсутствии ввода
+            currentSpeed = Mathf.MoveTowards(currentSpeed, 0f, acceleration * 3f * Time.deltaTime);
+            smoothedVelocity = Vector3.Lerp(smoothedVelocity, Vector3.zero, acceleration * 2f * Time.deltaTime);
+            currentVelocity = smoothedVelocity * currentSpeed;
+            currentMovementType = "None";
+        }
+        
+        isGrounded = true;
+    }
+    
+    void DetermineMovementType(float h, float v)
+    {
+        bool hasHorizontal = Mathf.Abs(h) > 0.05f;
+        bool hasVertical = Mathf.Abs(v) > 0.05f;
+        
+        if (!hasHorizontal && !hasVertical)
+        {
+            currentMovementType = "None";
+        }
+        else if (!hasHorizontal && hasVertical)
+        {
+            currentMovementType = v > 0 ? "ForwardOnly" : "BackwardOnly";
+        }
+        else if (hasHorizontal && !hasVertical)
+        {
+            currentMovementType = "SidewaysOnly";
+        }
+        else
+        {
+            // Комбинированное движение
+            if (v > 0 && Mathf.Abs(v) > Mathf.Abs(h))
+            {
+                currentMovementType = "ForwardSideways";
+            }
+            else if (v < 0 && Mathf.Abs(v) > Mathf.Abs(h))
+            {
+                currentMovementType = "BackwardSideways";
+            }
+            else
+            {
+                currentMovementType = "Diagonal";
+            }
+        }
+    }
+    
+    Vector3 GetMovementDirection(float h, float v)
+    {
+        if (cameraTransform == null)
+            return new Vector3(h, 0, v).normalized;
+            
+        Vector3 forward = cameraTransform.forward;
+        Vector3 right = cameraTransform.right;
+        
+        forward.y = 0;
+        right.y = 0;
+        forward.Normalize();
+        right.Normalize();
+        
+        // Для специальных типов движения используем чистые направления
+        switch (currentMovementType)
+        {
+            case "ForwardOnly":
+                return forward * Mathf.Sign(v);
+                
+            case "BackwardOnly":
+                return -forward * Mathf.Sign(v);
+
+case "SidewaysOnly":
+                return right * Mathf.Sign(h);
+                
+            default:
+                // Для комбинированных движений используем смешанное направление
+                return (forward * v + right * h).normalized;
+        }
+    }
+    
+    void UpdateTurnAnimation()
+    {
+        // Вычисляем угол поворота между кадрами
+        float angleChange = 0f;
+        
+        if (previousForward != Vector3.zero && transform.forward != Vector3.zero)
+        {
+            angleChange = Vector3.SignedAngle(previousForward, transform.forward, Vector3.up);
+        }
+        
+        // Фильтруем очень маленькие изменения
+        if (Mathf.Abs(angleChange) < 0.1f)
+        {
+            angleChange = 0f;
+        }
+        
+        // Вычисляем скорость поворота
+        turnSpeed = angleChange / Time.deltaTime;
+        
+        // Определяем угол поворота для анимаций
+        // При строгом боковом или заднем движении без поворота лица
+        if ((currentMovementType == "SidewaysOnly" || 
+             currentMovementType == "BackwardOnly") && 
+            !faceMovementDirection && 
+            currentSpeed > 0.1f)
+        {
+            // Минимальный поворот, смотрим вперед
+            float targetTurnAngle = 0f;
+            if (currentMovementType == "SidewaysOnly")
+            {
+                targetTurnAngle = Mathf.Clamp(sidewaysInput * 0.2f, -0.3f, 0.3f);
+            }
+            
+            turnAngle = Mathf.Lerp(turnAngle, targetTurnAngle, turnAnimationSpeed * Time.deltaTime);
+            turnSpeed = 0f;
+        }
+        else
+        {
+            // Обычный расчет
+            float normalizedTurn = Mathf.Clamp(turnSpeed / 180f, -1f, 1f);
+            turnAngle = Mathf.Lerp(turnAngle, normalizedTurn, turnAnimationSpeed * Time.deltaTime);
+        }
+        
+        // Определяем, происходит ли значительный поворот
+        isTurning = Mathf.Abs(turnSpeed) > 30f && Mathf.Abs(turnAngle) > 0.1f;
+        
+        // Снижаем влияние поворота при специальных типах движения
+        if ((currentMovementType == "SidewaysOnly" || 
+             currentMovementType == "BackwardOnly") && 
+            !faceMovementDirection)
+        {
+            turnAngle *= 0.1f;
+            isTurning = false;
+        }
+    }
+    
+    void UpdateAnimations()
+    {
+        if (animator == null) return;
+        
+        bool isActuallyMoving = currentSpeed > 0.1f;
+        
+        // Основная скорость (максимальная 1) - используем фактические значения скорости
+        float speedPercent = Mathf.Clamp01(currentSpeed / runSpeed);
+        
+        // Для более отзывчивых анимаций используем большую скорость интерполяции
+        animator.SetFloat(SpeedHash, isActuallyMoving ? speedPercent : 0f, 
+            animationSmoothTime * 0.5f, Time.deltaTime);
+        animator.SetBool(IsMovingHash, isActuallyMoving);
+        animator.SetBool(IsRunningHash, isRunning && isActuallyMoving);
+        animator.SetBool(IsGroundedHash, isGrounded);
+        
+        // Параметры для направления движения
+        if (cameraTransform != null && isActuallyMoving)
+        {
+            Vector3 localVelocity = transform.InverseTransformDirection(currentVelocity);
+            
+            // MoveX - боковое движение (-1 = влево, 1 = вправо)
+            float moveX = Mathf.Clamp(localVelocity.x / walkSpeed, -1f, 1f);
+            
+            // MoveY - переднее/заднее движение (-1 = назад, 1 = вперед)
+            float moveY = Mathf.Clamp(localVelocity.z / walkSpeed, -1f, 1f);
+            
+            // Корректируем для чистого заднего движения
+            if (currentMovementType == "BackwardOnly" && Mathf.Abs(moveY) < 0.3f)
+            {
+                moveY = -0.8f * Mathf.Abs(forwardInput);
+            }
+            
+            animator.SetFloat(MoveXHash, moveX, animationSmoothTime, Time.deltaTime);
+            animator.SetFloat(MoveYHash, moveY, animationSmoothTime, Time.deltaTime);
+        }
+        else
+        {
+            animator.SetFloat(MoveXHash, 0f, animationSmoothTime, Time.deltaTime);
+
+animator.SetFloat(MoveYHash, 0f, animationSmoothTime, Time.deltaTime);
+        }
+        
+        // Параметры поворота
+        float animTurnAngle = turnAngle;
+        if ((currentMovementType == "SidewaysOnly" || 
+             currentMovementType == "BackwardOnly") && 
+            !faceMovementDirection && isActuallyMoving)
+        {
+            // Минимальный поворот при специальных движениях
+            if (currentMovementType == "SidewaysOnly")
+            {
+                animTurnAngle = Mathf.Clamp(sidewaysInput * 0.2f, -0.3f, 0.3f);
+            }
+            else
+            {
+                animTurnAngle = 0f;
+            }
+        }
+        
+        animator.SetFloat(TurnAngleHash, animTurnAngle, animationSmoothTime, Time.deltaTime);
+        animator.SetBool(IsTurningHash, isTurning);
+        animator.SetFloat(TurnSpeedHash, Mathf.Abs(turnSpeed) / 180f, animationSmoothTime, Time.deltaTime);
+        
+        // MotionSpeed для скорости анимации - адаптируем под текущую скорость
+        float motionSpeed = 1f;
+        if (isActuallyMoving)
+        {
+            motionSpeed = isRunning ? 1.5f : 1f;
+            
+            // Корректируем скорость анимации для разных типов движения
+            if (currentMovementType == "SidewaysOnly")
+                motionSpeed *= 0.9f;
+            else if (currentMovementType == "BackwardOnly")
+                motionSpeed *= 0.8f;
+                
+            // Увеличиваем speed анимации при высокой скорости
+            motionSpeed *= Mathf.Lerp(0.8f, 1.2f, speedPercent);
+        }
+        animator.SetFloat("MotionSpeed", motionSpeed);
+    }
+    
+    void UpdateRotation()
+    {
+        bool isActuallyMoving = currentSpeed > 0.1f;
+        
+        if (isActuallyMoving)
+        {
+            if ((currentMovementType == "SidewaysOnly" || 
+                 currentMovementType == "BackwardOnly") && 
+                !faceMovementDirection)
+            {
+                // ПРИ СПЕЦИАЛЬНЫХ ДВИЖЕНИЯХ: смотрим вперед
+                Vector3 cameraForward = GetCameraForward();
+                float targetAngle = Mathf.Atan2(cameraForward.x, cameraForward.z) * Mathf.Rad2Deg;
+                
+                float smoothedAngle = Mathf.SmoothDampAngle(
+                    transform.eulerAngles.y,
+                    targetAngle,
+                    ref rotationVelocity,
+                    rotationSmoothTime
+                );
+                
+                transform.rotation = Quaternion.Euler(0f, smoothedAngle, 0f);
+            }
+            else if (faceMovementDirection && currentVelocity.magnitude > 0.1f)
+            {
+                // ПОВОРОТ В НАПРАВЛЕНИИ ДВИЖЕНИЯ
+                Vector3 lookDirection = currentVelocity.normalized;
+                float targetAngle = Mathf.Atan2(lookDirection.x, lookDirection.z) * Mathf.Rad2Deg;
+                
+                float smoothedAngle = Mathf.SmoothDampAngle(
+                    transform.eulerAngles.y,
+                    targetAngle,
+                    ref rotationVelocity,
+                    rotationSmoothTime
+                );
+                
+                transform.rotation = Quaternion.Euler(0f, smoothedAngle, 0f);
+            }
+            else
+            {
+                // ОБЫЧНОЕ ДВИЖЕНИЕ БЕЗ ПОВОРОТА ЛИЦА
+                // Плавно поворачиваемся к направлению камеры
+                Vector3 cameraForward = GetCameraForward();
+                float targetAngle = Mathf.Atan2(cameraForward.x, cameraForward.z) * Mathf.Rad2Deg;
+                
+                float smoothedAngle = Mathf.SmoothDampAngle(
+                    transform.eulerAngles.y,
+                    targetAngle,
+                    ref rotationVelocity,
+                    rotationSmoothTime
+                );
+                
+                transform.rotation = Quaternion.Euler(0f, smoothedAngle, 0f);
+            }
+        }
+        else
+        {
+            // Стоим на месте
+            rotationVelocity = 0f;
+        }
+    }
+    
+    Vector3 GetCameraForward()
+    {
+        if (cameraTransform == null) return Vector3.forward;
+
+Vector3 forward = cameraTransform.forward;
+        forward.y = 0;
+        forward.Normalize();
+        return forward;
+    }
+    
+    Vector3 GetCameraRight()
+    {
+        if (cameraTransform == null) return Vector3.right;
+        
+        Vector3 right = cameraTransform.right;
+        right.y = 0;
+        right.Normalize();
+        return right;
+    }
+    
+    // Вспомогательные методы
+    public bool IsRunning()
+    {
+        return isRunning && currentSpeed > 0.1f;
+    }
+    
+    public bool IsMoving()
+    {
+        return currentSpeed > 0.1f;
+    }
+    
+    public float GetCurrentSpeed()
+    {
+        return currentSpeed;
+    }
+    
+    public Vector3 GetMovementDirection()
+    {
+        return currentVelocity.normalized;
+    }
+    
+    public string GetCurrentMovementType()
+    {
+        return currentMovementType;
+    }
+    
+    // Метод для отладки скорости
+    public void DebugSpeedSettings()
+    {
+        Debug.Log($"Walk Speed: {walkSpeed}");
+        Debug.Log($"Run Speed: {runSpeed}");
+        Debug.Log($"Sideways Walk: {sidewaysWalkSpeed}");
+        Debug.Log($"Sideways Run: {sidewaysRunSpeed}");
+        Debug.Log($"Backward Walk: {backwardWalkSpeed}");
+        Debug.Log($"Backward Run: {backwardRunSpeed}");
+        Debug.Log($"Current Speed: {currentSpeed}");
+    }
+    
+    void OnDrawGizmos()
+    {
+        if (Application.isPlaying)
+        {
+            // Текущее направление взгляда
+            Gizmos.color = Color.blue;
+            Gizmos.DrawRay(transform.position, transform.forward * 2f);
+            
+            // Направление движения
+            if (currentSpeed > 0.1f)
+            {
+                Gizmos.color = Color.green;
+                Gizmos.DrawRay(transform.position, currentVelocity.normalized * 2f);
+            }
+            
+            // Индикатор типа движения и скорости
+            Vector3 labelPos = transform.position + Vector3.up * 2.5f;
+            #if UNITY_EDITOR
+            string debugText = $"Type: {currentMovementType}\nSpeed: {currentSpeed:F1}/{runSpeed:F1}\nVel: {currentVelocity.magnitude:F1}";
+            UnityEditor.Handles.Label(labelPos, debugText);
+            #endif
+        }
+    }
+}
